@@ -20,9 +20,32 @@ class AuthStack(Stack):
             cognito_domain=cognito.CognitoDomainOptions(domain_prefix=f"{project_prefix}-agentcore-dev")
         )
 
+        # Add resource server for client credentials scope
+        gateway_access_scope = cognito.ResourceServerScope(
+            scope_name="gateway.access",
+            scope_description="Access to the MCP Gateway"
+        )
+        
+        self.resource_server = self.user_pool.add_resource_server("AgentCoreResourceServer",
+            identifier=f"{project_prefix}-api",
+            scopes=[gateway_access_scope]
+        )
+
         self.app_client = self.user_pool.add_client("AgentCoreClient",
             generate_secret=True,
-            o_auth=None
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(
+                    client_credentials=True
+                ),
+                scopes=[
+                    cognito.OAuthScope.resource_server(self.resource_server, gateway_access_scope)
+                ],
+                callback_urls=["https://localhost:3000/callback"],  # Required even if not used
+                logout_urls=["https://localhost:3000/logout"]       # Required even if not used
+            ),
+            supported_identity_providers=[
+                cognito.UserPoolClientIdentityProvider.COGNITO
+            ]
         )
 
         self.client_secret_secret = secretsmanager.Secret(self, "AgentCoreClientSecret",

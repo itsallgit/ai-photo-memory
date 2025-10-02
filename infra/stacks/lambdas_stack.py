@@ -38,7 +38,3 @@ class LambdasStack(Stack):
             "photo_service": self.photo_service,
             "memory_service": self.memory_service
         }
-
-        # Grant the gateway invoke role permission to invoke these lambdas
-        for fn in self.lambda_functions.values():
-            fn.grant_invoke(self.base_stack.gateway_invoke_role)

@@ -1,5 +1,7 @@
 from aws_cdk import (
     Stack,
+    Duration,
+    CustomResource,
     aws_lambda as _lambda,
     aws_iam as iam,
     custom_resources as cr,
@@ -18,25 +20,42 @@ class GatewayStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_10,
             handler="handler.lambda_handler",
             code=_lambda.Code.from_asset(handler_dir),
-            timeout=_lambda.Duration.seconds(300),
+            timeout=Duration.seconds(300),
             log_retention=logs.RetentionDays.ONE_WEEK
         )
 
+        # Add required permissions for Bedrock AgentCore operations
         gw_lambda.add_to_role_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
             actions=[
-                "bedrock-agentcore-control:CreateGateway",
-                "bedrock-agentcore-control:CreateGatewayTarget",
-                "bedrock-agentcore-control:DescribeGateway",
-                "bedrock-agentcore-control:DeleteGateway",
-                "bedrock-agentcore-control:UpdateGateway",
-                "bedrock-agentcore-control:ListGateways",
-                "bedrock-agentcore-control:ListGatewayTargets",
-                "bedrock-agentcore-control:DeleteGatewayTarget",
-                "iam:PassRole",
-                "secretsmanager:GetSecretValue",
-                "cognito-idp:DescribeUserPoolClient"
+                "bedrock-agentcore:CreateGateway",
+                "bedrock-agentcore:DeleteGateway",
+                "bedrock-agentcore:DescribeGateway",
+                "bedrock-agentcore:ListGateways",
+                "bedrock-agentcore:CreateGatewayTarget",
+                "bedrock-agentcore:DeleteGatewayTarget",
+                "bedrock-agentcore:ListGatewayTargets",
+                "bedrock-agentcore:UpdateGateway",
+                "bedrock-agentcore:UpdateGatewayTarget",
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:ListWorkloadIdentities"
             ],
             resources=["*"]
+        ))
+
+        # Add permission to pass the gateway invoke role to Bedrock
+        gw_lambda.add_to_role_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["iam:PassRole"],
+            resources=[gateway_invoke_role.role_arn]
+        ))
+
+        # Add permission to read Cognito client secret
+        gw_lambda.add_to_role_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[cognito_details.get("client_secret_arn")]
         ))
 
         provider = cr.Provider(self, "GatewayManagerProvider", on_event_handler=gw_lambda)
@@ -54,7 +73,7 @@ class GatewayStack(Stack):
             "ProjectPrefix": project_prefix
         }
 
-        cr.CustomResource(self, "GatewayManagerResource",
+        CustomResource(self, "GatewayManagerResource",
             service_token=provider.service_token,
             properties=props
         )

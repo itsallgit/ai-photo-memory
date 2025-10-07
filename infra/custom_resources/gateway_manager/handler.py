@@ -1,10 +1,62 @@
 import json
 import boto3
 import logging
+import time
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+def wait_for_gateway_ready(client, gateway_id, max_wait_seconds=300):
+    """Wait for gateway to reach ACTIVE status"""
+    logger.info(f"Waiting for gateway {gateway_id} to become ACTIVE...")
+    start_time = time.time()
+    consecutive_unknown = 0
+    
+    while time.time() - start_time < max_wait_seconds:
+        try:
+            # List gateways to check status
+            resp = client.list_gateways()
+            gateway_found = False
+            
+            for g in resp.get('items', []):
+                if g.get('gatewayId') == gateway_id:
+                    gateway_found = True
+                    status = g.get('gatewayStatus', 'UNKNOWN')
+                    logger.info(f"Gateway {gateway_id} status: {status}")
+                    logger.info(f"Full gateway object: {json.dumps(g, indent=2, default=str)}")
+                    
+                    if status == 'ACTIVE':
+                        logger.info(f"Gateway {gateway_id} is now ACTIVE")
+                        return True
+                    elif status in ['FAILED', 'DELETING', 'DELETED']:
+                        logger.error(f"Gateway {gateway_id} is in failed state: {status}")
+                        return False
+                    elif status == 'UNKNOWN':
+                        consecutive_unknown += 1
+                        logger.warning(f"Gateway status UNKNOWN (count: {consecutive_unknown})")
+                        # If status is unknown for too long, treat as failure
+                        if consecutive_unknown >= 6:  # 60 seconds of unknown status
+                            logger.error(f"Gateway {gateway_id} status has been UNKNOWN for too long")
+                            return False
+                    else:
+                        # Reset unknown counter if we get a valid status
+                        consecutive_unknown = 0
+                    break
+            
+            if not gateway_found:
+                logger.error(f"Gateway {gateway_id} not found in list_gateways response")
+                return False
+                    
+            # Wait before next check
+            time.sleep(10)
+            
+        except Exception as e:
+            logger.warning(f"Error checking gateway status: {e}")
+            time.sleep(10)
+    
+    logger.error(f"Gateway {gateway_id} did not become ACTIVE within {max_wait_seconds} seconds")
+    return False
 
 def get_client(region):
     return boto3.client('bedrock-agentcore-control', region_name=region)
@@ -25,7 +77,7 @@ def create_or_update_gateway(event, context):
 
     issuer, jwks_uri = cognito_jwks_and_issuer(region, user_pool_id)
 
-    # Check for existing gateway
+    # Check for existing gateway and delete it if found
     existing = None
     try:
         resp = client.list_gateways()
@@ -39,23 +91,36 @@ def create_or_update_gateway(event, context):
 
     if existing:
         gateway_id = existing['gatewayId']
-        logger.info(f"Found existing gateway id={gateway_id}, skipping create.")
-    else:
-        create_resp = client.create_gateway(
-            name=gateway_name,
-            protocolType='MCP',
-            roleArn=role_arn,
-            authorizerType='CUSTOM_JWT',
-            authorizerConfiguration={
-                'customJWTAuthorizer': {
-                    'discoveryUrl': f"{issuer}/.well-known/openid-configuration",
-                    'allowedAudience': [app_client_id],
-                    'allowedClients': [app_client_id]
-                }
+        logger.info(f"Found existing gateway id={gateway_id}, deleting before creating new one.")
+        try:
+            client.delete_gateway(gatewayIdentifier=gateway_id)
+            logger.info(f"Successfully deleted existing gateway id={gateway_id}")
+        except ClientError as e:
+            logger.warning(f"Failed to delete existing gateway {gateway_id}: {e}")
+            # Continue anyway - creation might still work
+    
+    # Always create a new gateway
+    create_resp = client.create_gateway(
+        name=gateway_name,
+        protocolType='MCP',
+        roleArn=role_arn,
+        authorizerType='CUSTOM_JWT',
+        authorizerConfiguration={
+            'customJWTAuthorizer': {
+                'discoveryUrl': f"{issuer}/.well-known/openid-configuration",
+                'allowedClients': [app_client_id]
             }
-        )
-        gateway_id = create_resp['gatewayId']
-        logger.info(f"Created gateway id={gateway_id}")
+        }
+    )
+    gateway_id = create_resp['gatewayId']
+    logger.info(f"Created new gateway id={gateway_id}")
+    
+    # Wait for gateway to become ACTIVE before proceeding
+    logger.info("Waiting for newly created gateway to be ready...")
+    if not wait_for_gateway_ready(client, gateway_id):
+        logger.warning("Gateway status check failed, but proceeding to attempt target creation")
+        # Don't fail here - sometimes the API works even with status issues
+        # The actual target creation will fail if the gateway isn't ready
 
     # Define tool schemas and map to lambdas
     lambda_arns = props.get('LambdaArns', {})
@@ -161,7 +226,7 @@ def delete_gateway(event, context):
         resp = client.list_gateway_targets(gatewayIdentifier=gateway_id)
         for t in resp.get('items', []):
             try:
-                client.delete_gateway_target(gatewayIdentifier=gateway_id, targetIdentifier=t['targetId'])
+                client.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=t['targetId'])
             except Exception as e:
                 logger.info(f"Failed deleting target {t.get('name')}: {e}")
     except Exception as e:
